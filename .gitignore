@@ -172,7 +172,7 @@ data_trajectories
 *.err
 *.out
 
-*isaacgym
+
 
 
 *.pickle

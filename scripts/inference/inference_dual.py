@@ -46,6 +46,34 @@ TRAINED_MODELS_DIR = '../../data_trained_models/'
 # Requires: GaussianDiffusionModel.p_sample_step(...) method (added to your diffusion class).
 # If you moved this helper to mpd.models.diffusion_models.sample_functions, you can import it
 # and delete this local definition.
+
+import math
+
+def make_T(x=0.0, y=0.0, z=0.0, yaw=0.0, device="cuda", dtype=torch.float32):
+    c, s = math.cos(yaw), math.sin(yaw)
+    T = torch.tensor([[ c, -s, 0., x],
+                      [ s,  c, 0., y],
+                      [0., 0., 1., z],
+                      [0., 0., 0., 1.]], device=device, dtype=dtype)
+    return T
+
+def apply_T_to_positions(pos_bhn3: torch.Tensor, T_44: torch.Tensor) -> torch.Tensor:
+    """
+    pos: (B,H,N,3) or (BH,N,3) ; T: (4,4)
+    returns same shape with world offset applied.
+    """
+    if pos_bhn3.dim() == 3:   # (BH, N, 3)
+        ph = torch.cat([pos_bhn3, torch.ones_like(pos_bhn3[..., :1])], dim=-1)      # (BH,N,4)
+        pw = torch.einsum('ij,bnj->bni', T_44, ph)[..., :3]                          # (BH,N,3)
+        return pw
+    elif pos_bhn3.dim() == 4: # (B, H, N, 3)
+        ph = torch.cat([pos_bhn3, torch.ones_like(pos_bhn3[..., :1])], dim=-1)      # (B,H,N,4)
+        pw = torch.einsum('ij,bhnj->bhni', T_44, ph)[..., :3]                        # (B,H,N,3)
+        return pw
+    else:
+        raise RuntimeError(f"Unexpected position tensor shape: {tuple(pos_bhn3.shape)}")
+
+
 @torch.no_grad()
 def alternating_block_gibbs_sample(
     model_a,
@@ -192,12 +220,50 @@ def experiment(
     task = dataset.task
 
     # Use the same Fanuc model for Robot B (identical geometry, separate motion)
-    robot_a = robot
-    robot_b = robot
+    # keep dataset.robot as the reference geometry/limits
+    robot_a = RobotFanuc(use_collision_spheres=robot.use_collision_spheres, tensor_args=tensor_args)
+    robot_b = RobotFanuc(use_collision_spheres=robot.use_collision_spheres, tensor_args=tensor_args)
+
+    # copy joint limits if needed (usually RobotFanuc sets them internally already)
+    robot_a.q_min, robot_a.q_max = robot.q_min, robot.q_max
+    robot_b.q_min, robot_b.q_max = robot.q_min, robot.q_max
 
     dt = trajectory_duration / n_support_points
+    
     robot_a.dt = dt
     robot_b.dt = dt
+
+    device = tensor_args['device']
+    T_world_base_a = make_T(0.0, 0.0, 0.0, yaw=0.0, device=device)   # keep A at origin
+    T_world_base_b = make_T(0.8, 0.0, 0.0, yaw=0.0, device=device)   # move B +0.8 m in X
+
+    # keep bound originals
+    _fk_a = robot_a.fk_map_collision
+    _fk_b = robot_b.fk_map_collision
+
+    def fk_map_collision_a(q_pos):
+        return _fk_a(q_pos)  # unchanged
+
+    def fk_map_collision_b(q_pos):
+        pos = _fk_b(q_pos)                 # (B,H,N,3) or (BH,N,3)
+        return apply_T_to_positions(pos, T_world_base_b)
+
+    robot_a.fk_map_collision = fk_map_collision_a
+    robot_b.fk_map_collision = fk_map_collision_b
+
+    # --- also offset Robot B's collision spheres so inter-robot cost sees the shift ---
+    if hasattr(robot_b, "get_collision_spheres"):
+        _get_spheres_b = robot_b.get_collision_spheres
+        def get_collision_spheres_b(trajs):
+            pos, rad = _get_spheres_b(trajs)        # pos: (B,H,N,3) or (BH,N,3)
+            pos = apply_T_to_positions(pos, T_world_base_b)
+            return pos, rad
+        robot_b.get_collision_spheres = get_collision_spheres_b
+
+
+    #dt = trajectory_duration / n_support_points
+    #robot_a.dt = dt
+    #robot_b.dt = dt
 
     ########################################################################################################################
     # Load prior model (reuse for both Fanucs)
@@ -566,6 +632,49 @@ def experiment(
                 show_collision_spheres=False,
                 dt=dt,
             )
+            #test
+            num_envs = len(motion_planning_isaac_env.envs)
+            envh = motion_planning_isaac_env.envs[0]
+            print("num_envs:", num_envs, "actors in env[0]:", motion_planning_isaac_env.gym.get_actor_count(envh))
+            for i in range(motion_planning_isaac_env.gym.get_actor_count(envh)):
+                ah = motion_planning_isaac_env.gym.get_actor_handle(envh, i)
+                print(i, motion_planning_isaac_env.gym.get_actor_name(envh, ah))
+            #debug
+
+            from isaacgym import gymapi, gymtorch
+
+            gym  = motion_planning_isaac_env.gym
+            sim  = motion_planning_isaac_env.sim
+            envh = motion_planning_isaac_env.envs[0]   # single env when all_robots_in_one_env=True
+
+            # Refresh first, then wrap the current root-state tensor
+            gym.refresh_actor_root_state_tensor(sim)
+            root = gymtorch.wrap_tensor(gym.acquire_actor_root_state_tensor(sim))
+
+            # Find the two Fanuc actors in this env
+            num_actors = gym.get_actor_count(envh)
+            robot_handles = []
+            for i in range(num_actors):
+                ah   = gym.get_actor_handle(envh, i)
+                name = gym.get_actor_name(envh, ah)
+                if name and "fanuc" in name.lower():
+                    robot_handles.append(ah)
+
+            # Fallback: if names aren’t informative, just take the last two actors
+            if len(robot_handles) < 2:
+                robot_handles = [gym.get_actor_handle(envh, num_actors - 2),
+                                gym.get_actor_handle(envh, num_actors - 1)]
+
+            # Map second robot handle → SIM root-state index
+            actor_b_handle  = robot_handles[1]
+            actor_b_sim_idx = gym.get_actor_index(envh, actor_b_handle, gymapi.DOMAIN_SIM)
+
+            # Shift robot B’s base by +0.8 m in X (must match your planner’s offset)
+            root[actor_b_sim_idx, 0:3] = torch.tensor([0.8, 0.0, 0.0], device=root.device, dtype=root.dtype)
+
+            # Push the updated root states back to the simulator
+            gym.set_actor_root_state_tensor(sim, gymtorch.unwrap_tensor(root))
+
 
             motion_planning_controller = MotionPlanningController(motion_planning_isaac_env)
 
