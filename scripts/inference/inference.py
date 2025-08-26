@@ -1,5 +1,4 @@
 from torch_robotics.isaac_gym_envs.motion_planning_envs import PandaMotionPlanningIsaacGymEnv, MotionPlanningController
-
 from torch_robotics.isaac_gym_envs.motion_planning_envs_fanuc import FanucMotionPlanningIsaacGymEnv
 
 
@@ -43,8 +42,8 @@ def experiment(
     # model_id: str = 'EnvDense2D-RobotPointMass',
     # model_id: str = 'EnvNarrowPassageDense2D-RobotPointMass',
     # model_id: str = 'EnvSimple2D-RobotPointMass',
-    #model_id: str = 'EnvSpheres3D-RobotPanda',
-    model_id: str = 'EnvSpheres3D-RobotFanuc',
+    model_id: str = 'EnvSpheres3D-RobotPanda',
+    #model_id: str = 'EnvSpheres3D-RobotFanuc',
 
     # planner_alg: str = 'diffusion_prior',
     # planner_alg: str = 'diffusion_prior_then_guide',

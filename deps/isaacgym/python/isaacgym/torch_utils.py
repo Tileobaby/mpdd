@@ -10,6 +10,8 @@ license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import torch
 import numpy as np
+from typing import Tuple
+from torch import Tensor
 
 
 def to_torch(x, dtype=torch.float, device='cuda:0', requires_grad=False):
@@ -132,7 +134,7 @@ def get_basis_vector(q, v):
     return quat_rotate(q, v)
 
 
-def get_axis_params(value, axis_idx, x_value=0., dtype=np.float, n_dims=3):
+def get_axis_params(value, axis_idx, x_value=0., dtype=np.float64, n_dims=3):
     """construct arguments to `Vec` according to axis index.
     """
     zs = np.zeros((n_dims,))
