@@ -74,7 +74,7 @@ class EnvSpheres3D(EnvBase):
             },
             stop_criteria=0.1,
         )
-        if isinstance(robot, RobotPanda, RobotFanuc):
+        if isinstance(robot, (RobotPanda, RobotFanuc)):
             return params
         else:
             raise NotImplementedError
@@ -88,7 +88,7 @@ class EnvSpheres3D(EnvBase):
 
             max_time=180
         )
-        if isinstance(robot, RobotPanda, RobotFanuc):
+        if isinstance(robot, (RobotPanda, RobotFanuc)):
             return params
         else:
             raise NotImplementedError
